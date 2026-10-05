@@ -1,0 +1,18 @@
+---
+# See the documentation for more information:
+# https://packit.dev/docs/configuration/
+
+specfile_path: rpm/libblkio.spec
+upstream_tag_template: v{version}
+
+srpm_build_deps:
+  - cargo
+  - git-archive-all
+
+jobs:
+  - job: copr_build
+    trigger: pull_request
+    enable_net: true
+    targets:
+      - fedora-all-x86_64
+      - fedora-all-aarch64

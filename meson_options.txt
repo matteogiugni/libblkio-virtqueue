@@ -1,0 +1,3 @@
+option('subproject-docs', type : 'feature', value : 'auto', description : 'Build docs when libblkio is used as a subproject')
+option('subproject-examples', type : 'feature', value : 'auto', description : 'Build examples when libblkio is used as a subproject')
+option('subproject-tests', type : 'feature', value : 'auto', description : 'Build tests when libblkio is used as a subproject')

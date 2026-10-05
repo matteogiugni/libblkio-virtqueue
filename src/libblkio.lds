@@ -1,0 +1,48 @@
+{
+global:
+  blkio_add_poll_queue;
+  blkio_add_queue;
+  blkio_alloc_mem_region;
+  blkio_connect;
+  blkio_create;
+  blkio_destroy;
+  blkio_free_mem_region;
+  blkio_get_bool;
+  blkio_get_error_msg;
+  blkio_get_int;
+  blkio_get_poll_queue;
+  blkio_get_queue;
+  blkio_get_str;
+  blkio_get_uint64;
+  blkio_map_mem_region;
+  blkioq_close_all_zones;
+  blkioq_close_zone;
+  blkioq_discard;
+  blkioq_do_io;
+  blkioq_do_io_interruptible;
+  blkioq_finish_all_zones;
+  blkioq_finish_zone;
+  blkioq_flush;
+  blkioq_get_completion_fd;
+  blkioq_open_all_zones;
+  blkioq_open_zone;
+  blkioq_read;
+  blkioq_readv;
+  blkioq_report_zones;
+  blkioq_reset_all_zones;
+  blkioq_reset_zone;
+  blkioq_set_completion_fd_enabled;
+  blkioq_write;
+  blkioq_writev;
+  blkioq_write_zeroes;
+  blkio_remove_poll_queue;
+  blkio_remove_queue;
+  blkio_set_bool;
+  blkio_set_int;
+  blkio_set_str;
+  blkio_set_uint64;
+  blkio_start;
+  blkio_unmap_mem_region;
+local:
+  *;
+};
