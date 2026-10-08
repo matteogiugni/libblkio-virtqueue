@@ -9,6 +9,11 @@ use std::io::{Error, ErrorKind};
 use std::iter;
 use std::mem;
 
+// TEST
+use crate::rustvq;
+use crate::rustvq::userspace_hal::UserspaceHal;
+use std::ptr::NonNull;
+
 bitflags! {
     pub struct VirtioBlkFeatureFlags: u64 {
         const SIZE_MAX = 1 << 1;
@@ -275,6 +280,96 @@ impl<'a, C> VirtioBlkQueue<'a, C> {
                 .collect();
 
             let mem = transport.alloc_queue_mem(&layout)?;
+
+            // TEST
+            if num_queues > 0 {
+                let queue_offset = 0;
+
+                let mem_queue_ptr = unsafe {
+                    mem.as_mut_ptr().add(queue_offset)
+                };
+
+                let ring_len = layout.req_offset;
+
+                let cpu_base = NonNull::new(mem_queue_ptr).ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::Other,
+                        "RFL queue memory base is null",
+                    )
+                })?;
+
+                let dma_base = iova_translators[0]
+                    .translate_addr(
+                        cpu_base.as_ptr() as usize,
+                        ring_len,
+                    )?
+                    .0;
+
+                eprintln!(
+                    "RFL arena: cpu_base={:#x} dma_base={:#x} size={}",
+                    cpu_base.as_ptr() as usize,
+                    dma_base,
+                    ring_len,
+                );
+
+                let hal = unsafe {
+                    UserspaceHal::new(
+                        cpu_base,
+                        dma_base,
+                        ring_len,
+                    )
+                };
+
+                let rfl_vq = rustvq::new_virtqueue(
+                    hal,
+                    0,
+                    queue_size,
+                    rustvq::virtqueue::VirtQueueFeatures {
+                        indirect: false,
+                        event_idx: false,
+                    },
+                )
+                .map_err(|_| {
+                    Error::new(
+                        ErrorKind::Other,
+                        "failed to create RFL VirtQueue",
+                    )
+                })?;
+
+                let desc = rfl_vq
+                    .descriptor_dma_addr()
+                    .map_err(|_| Error::new(ErrorKind::Other, "failed to get descriptor address"))?;
+
+                let avail = rfl_vq
+                    .driver_area_dma_addr()
+                    .map_err(|_| Error::new(ErrorKind::Other, "failed to get driver area address"))?;
+
+                let used = rfl_vq
+                    .device_area_dma_addr()
+                    .map_err(|_| Error::new(ErrorKind::Other, "failed to get device area address"))?;
+
+                eprintln!(
+                    "RFL vq: desc={:#x} avail={:#x} used={:#x}",
+                    desc,
+                    avail,
+                    used,
+                );
+
+                eprintln!(
+                    "RFL vq offsets: desc={} avail={} used={}",
+                    desc - dma_base,
+                    avail - dma_base,
+                    used - dma_base,
+                );
+
+                eprintln!(
+                    "RFL arena end={:#x}",
+                    dma_base + ring_len as u64,
+                );
+
+                drop(rfl_vq);
+            }
+            // END TEST
 
             iova_translators
                 .into_iter()
