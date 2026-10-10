@@ -43,22 +43,27 @@ fn fail_req_due_to_read_only(completion_backlog: &mut CompletionBacklog, req: &R
     ));
 }
 
-struct Queue<'a> {
+struct Queue {
     features: VirtioBlkFeatureFlags,
-    vq: VirtioBlkQueue<'a, ReqContext>,
+    vq: VirtioBlkQueue<ReqContext>,
     submission_notifier: Box<dyn QueueNotifier>,
     completion_fd: Option<Arc<EventFd>>,
     completion_fd_enabled: bool,
     read_only: bool,
     submissions_to_notify: bool,
     submissions_in_flight: usize,
+    // TEST
+    // OUR virtqueue resets the num_added value after a kick_prepare()
+    // so we need to track if a kick is pending.
+    kick_pending: bool,
+    // END TEST
 }
 
-impl<'a> Queue<'a> {
+impl Queue {
     pub fn new(
         poll: bool,
         features: VirtioBlkFeatureFlags,
-        mut vq: VirtioBlkQueue<'a, ReqContext>,
+        mut vq: VirtioBlkQueue<ReqContext>,
         submission_notifier: Box<dyn QueueNotifier>,
         completion_fd: Arc<EventFd>,
         read_only: bool,
@@ -79,17 +84,25 @@ impl<'a> Queue<'a> {
             read_only,
             submissions_to_notify: false,
             submissions_in_flight: 0,
+            kick_pending: false, // TEST
         }
     }
 
     fn notify_requests(&mut self) -> Result<()> {
-        if self.submissions_to_notify && self.vq.avail_notif_needed() {
+        // TEST
+        if self.submissions_to_notify {
+            self.kick_pending |= self.vq.avail_notif_needed();
+            self.submissions_to_notify = false;
+        }
+
+        if self.kick_pending {
             self.submission_notifier
                 .notify()
                 .map_err(|e| Error::from_io_error(e, Errno::IO))?;
 
-            self.submissions_to_notify = false;
+            self.kick_pending = false;
         }
+        // END TEST
 
         Ok(())
     }
@@ -143,7 +156,7 @@ impl<'a> Queue<'a> {
     }
 }
 
-impl crate::Queue for Queue<'_> {
+impl crate::Queue for Queue {
     fn is_poll_queue(&self) -> bool {
         self.completion_fd.is_none()
     }

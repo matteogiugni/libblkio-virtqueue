@@ -6,3 +6,6 @@ blkio_copy = executable('blkio-copy', 'blkio-copy.c',
 
 blkio_info = executable('blkio-info', 'blkio-info.c',
                         dependencies: libblkio_dep)
+
+rustvq = executable('rustvq', 'rustvq.c',
+                    dependencies: libblkio_dep,)

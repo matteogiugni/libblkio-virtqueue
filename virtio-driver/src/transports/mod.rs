@@ -35,6 +35,14 @@ pub trait IovaTranslator: Send + Sync {
     fn translate_addr(&self, addr: usize, len: usize) -> Result<Iova, Error>;
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct VirtqueueConfig {
+    pub queue_size: u16,
+    pub desc_device_addr: u64,
+    pub driver_device_addr: u64,
+    pub device_device_addr: u64,
+}
+
 /// An interface to the virtio transport/bus of a device
 ///
 /// Type parameters:
@@ -82,6 +90,15 @@ pub trait VirtioTransport<C: ByteValued, R: Copy>: Send + Sync {
 
     /// Initialises and enables the passed queues on the transport level.
     fn setup_queues(&mut self, queues: &[Virtqueue<R>]) -> Result<(), Error>;
+
+    /// Initialises and enables the passed queues on the transport level.
+    fn setup_queues_from_config(&mut self, _queues: &[VirtqueueConfig]) -> Result<(), Error>
+    {
+        Err(Error::new(
+            std::io::ErrorKind::Unsupported,
+            "queue configuration not supported",
+        ))
+    }
 
     /// Returns the negotiated virtio feature flags.
     fn get_features(&self) -> u64;

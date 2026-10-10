@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: (MIT OR Apache-2.0)
 
-use crate::virtqueue::{Virtqueue, VirtqueueIter, VirtqueueLayout};
+use crate::virtqueue::VirtqueueLayout;
 use crate::{ByteValued, Completion, Le16, Le32, Le64, VirtioFeatureFlags, VirtioTransport};
 use bitflags::bitflags;
 use libc::{c_void, iovec, EIO, ENOTSUP, EPROTO};
@@ -10,9 +10,19 @@ use std::iter;
 use std::mem;
 
 // TEST
-use crate::rustvq;
-use crate::rustvq::userspace_hal::UserspaceHal;
-use std::ptr::NonNull;
+use crate::rustvq::{
+    self,
+    adapter,
+    userspace_hal::UserspaceHal,
+    virtqueue::{
+        BufferDirection, DescriptorLayout, DmaSegment, Token,
+        VirtQueue, VirtQueueFeatures,
+    },
+};
+
+use crate::IovaTranslator;
+use std::ptr::{self, NonNull};
+//END TEST
 
 bitflags! {
     pub struct VirtioBlkFeatureFlags: u64 {
@@ -243,17 +253,57 @@ pub type VirtioBlkTransport = dyn VirtioTransport<VirtioBlkConfig, VirtioBlkReqB
 /// ```
 ///
 /// [`setup_queues`]: Self::setup_queues
-pub struct VirtioBlkQueue<'a, C> {
-    vq: Virtqueue<'a, VirtioBlkReqBuf>,
+pub struct VirtioBlkQueue<C> {
+    // TEST
+    vq: VirtQueue<UserspaceHal>,
+
+    iova_translator: Box<dyn IovaTranslator>,
+    req_bufs: NonNull<VirtioBlkReqBuf>,
+
     req_contexts: Box<[Option<C>]>,
+    // END TEST
 }
 
-impl<'a, C> VirtioBlkQueue<'a, C> {
-    fn new(vq: Virtqueue<'a, VirtioBlkReqBuf>) -> Self {
-        let queue_size = vq.queue_size().into();
+// TEST
+// SAFETY:
+// - All operations that access or mutate the virtqueue, request
+//   buffers, or request contexts require exclusive &mut self.
+// - The underlying pointers are not exposed through shared
+//   references to VirtioBlkQueue.
+// - Moving the queue does not invalidate the pointed-to memory.
+// - The transport must keep the registered backing memory alive
+//   until the queue is dropped.
+// - Backend access to shared ring memory is synchronized through
+//   the VirtIO protocol and the HAL memory barriers.
+//
+// This does not make VirtQueue or UserspaceHal independently
+// thread-safe.
+unsafe impl<C: Send> Send for VirtioBlkQueue<C> {}
+
+// SAFETY:
+// - Shared access to VirtioBlkQueue does not permit mutation of
+//   the internal Cell, descriptor state, or request buffers.
+// - Operations requiring such mutation need &mut self.
+// - Request contexts are Sync, and the IovaTranslator already
+//   requires Send + Sync.
+unsafe impl<C: Send + Sync> Sync for VirtioBlkQueue<C> {}
+// END TEST
+
+impl<C> VirtioBlkQueue<C> {
+    fn new(
+        vq: VirtQueue<UserspaceHal>,
+        iova_translator: Box<dyn IovaTranslator>,
+        req_bufs: NonNull<VirtioBlkReqBuf>,
+    ) -> Self {
+        let queue_size = usize::from(vq.size());
         let req_contexts = iter::repeat_with(|| None).take(queue_size).collect();
 
-        Self { vq, req_contexts }
+        Self {
+            vq,
+            iova_translator,
+            req_bufs,
+            req_contexts,
+        }
     }
 
     /// Creates the queues for a virtio-blk device.
@@ -270,9 +320,19 @@ impl<'a, C> VirtioBlkQueue<'a, C> {
         }
 
         let features = VirtioFeatureFlags::from_bits_truncate(transport.get_features());
+
+        // TEST
+        if features.contains(VirtioFeatureFlags::RING_PACKED) {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "RFL POC supports split virtqueues only",
+            ));
+        }
+        // END TEST
+
         let layout =
             VirtqueueLayout::new::<VirtioBlkReqBuf>(num_queues, queue_size as usize, features)?;
-        let queues: Vec<_> = {
+        let queues: Vec<Self> = {
             // Not actually needless: must drop the borrow on the transport before alloc_queue_mem()
             #[allow(clippy::needless_collect)]
             let iova_translators: Vec<_> = iter::repeat_with(|| transport.iova_translator())
@@ -282,36 +342,88 @@ impl<'a, C> VirtioBlkQueue<'a, C> {
             let mem = transport.alloc_queue_mem(&layout)?;
 
             // TEST
-            if num_queues > 0 {
-                let queue_offset = 0;
+            let mut queues = Vec::with_capacity(num_queues);
 
-                let mem_queue_ptr = unsafe {
-                    mem.as_mut_ptr().add(queue_offset)
-                };
+            for (i, iova_translator) in
+                iova_translators.into_iter().enumerate()
+            {
+                let start = i * layout.end_offset;
+                let end = start + layout.end_offset;
+                let mem_queue = &mut mem[start..end];
 
+                // The first part of each registered queue region
+                // is the backing arena for OUR split virtqueue.
                 let ring_len = layout.req_offset;
 
-                let cpu_base = NonNull::new(mem_queue_ptr).ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::Other,
-                        "RFL queue memory base is null",
-                    )
-                })?;
+                let cpu_base = NonNull::new(mem_queue.as_mut_ptr())
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorKind::Other,
+                            "RFL queue memory base is null",
+                        )
+                    })?;
 
-                let dma_base = iova_translators[0]
+                let dma_base = iova_translator
                     .translate_addr(
                         cpu_base.as_ptr() as usize,
                         ring_len,
                     )?
                     .0;
 
-                eprintln!(
-                    "RFL arena: cpu_base={:#x} dma_base={:#x} size={}",
-                    cpu_base.as_ptr() as usize,
-                    dma_base,
-                    ring_len,
-                );
+                // Per-request device-visible structures reside
+                // after the ring arena.
+                let req_size = mem::size_of::<VirtioBlkReqBuf>();
+                let pool_size = req_size
+                    .checked_mul(usize::from(queue_size))
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorKind::InvalidInput,
+                            "RFL request pool size overflow",
+                        )
+                    })?;
 
+                let pool_end = layout.req_offset
+                    .checked_add(pool_size)
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorKind::InvalidInput,
+                            "RFL request pool offset overflow",
+                        )
+                    })?;
+
+                if pool_end > mem_queue.len() {
+                    return Err(Error::new(
+                        ErrorKind::InvalidInput,
+                        "RFL request pool exceeds registered memory",
+                    ));
+                }
+
+                let req_ptr = unsafe {
+                    mem_queue.as_mut_ptr().add(layout.req_offset)
+                };
+
+                if (req_ptr as usize)
+                    % mem::align_of::<VirtioBlkReqBuf>()
+                    != 0
+                {
+                    return Err(Error::new(
+                        ErrorKind::InvalidInput,
+                        "RFL request pool is misaligned",
+                    ));
+                }
+
+                let req_bufs = NonNull::new(
+                    req_ptr.cast::<VirtioBlkReqBuf>()
+                )
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::Other,
+                        "RFL request pool address is null",
+                    )
+                })?;
+
+                // The arena is a non-owning view. The transport
+                // remains the owner of the backing mmap.
                 let hal = unsafe {
                     UserspaceHal::new(
                         cpu_base,
@@ -320,74 +432,75 @@ impl<'a, C> VirtioBlkQueue<'a, C> {
                     )
                 };
 
-                let rfl_vq = rustvq::new_virtqueue(
+                let vq_features = VirtQueueFeatures {
+                    indirect: false,
+                    event_idx: features.contains(
+                        VirtioFeatureFlags::RING_EVENT_IDX
+                    ),
+                };
+
+                let vq = rustvq::new_virtqueue(
                     hal,
-                    0,
+                    i as u16,
                     queue_size,
-                    rustvq::virtqueue::VirtQueueFeatures {
-                        indirect: false,
-                        event_idx: false,
-                    },
+                    vq_features,
                 )
                 .map_err(|_| {
                     Error::new(
                         ErrorKind::Other,
-                        "failed to create RFL VirtQueue",
+                        "RFL VirtQueue creation failed",
                     )
                 })?;
 
-                let desc = rfl_vq
-                    .descriptor_dma_addr()
-                    .map_err(|_| Error::new(ErrorKind::Other, "failed to get descriptor address"))?;
-
-                let avail = rfl_vq
-                    .driver_area_dma_addr()
-                    .map_err(|_| Error::new(ErrorKind::Other, "failed to get driver area address"))?;
-
-                let used = rfl_vq
-                    .device_area_dma_addr()
-                    .map_err(|_| Error::new(ErrorKind::Other, "failed to get device area address"))?;
-
                 eprintln!(
-                    "RFL vq: desc={:#x} avail={:#x} used={:#x}",
-                    desc,
-                    avail,
-                    used,
-                );
-
-                eprintln!(
-                    "RFL vq offsets: desc={} avail={} used={}",
-                    desc - dma_base,
-                    avail - dma_base,
-                    used - dma_base,
-                );
-
-                eprintln!(
-                    "RFL arena end={:#x}",
-                    dma_base + ring_len as u64,
-                );
-
-                drop(rfl_vq);
-            }
-            // END TEST
-
-            iova_translators
-                .into_iter()
-                .enumerate()
-                .map(|(i, iova_translator)| {
-                    let mem_queue = unsafe {
-                        std::slice::from_raw_parts_mut(
-                            &mut mem[i * layout.end_offset] as *mut u8,
-                            layout.end_offset,
+                    "RFL queue {i}: desc={:#x} avail={:#x} used={:#x}",
+                    vq.descriptor_dma_addr().map_err(|_| {
+                        Error::new(
+                            ErrorKind::Other,
+                            "Failed to get descriptor DMA address",
                         )
-                    };
-                    Virtqueue::new(iova_translator, mem_queue, queue_size, features)
-                })
-                .collect::<Result<_, _>>()?
-        };
-        transport.setup_queues(&queues)?;
+                    })?,
+                    vq.driver_area_dma_addr().map_err(|_| {
+                        Error::new(
+                            ErrorKind::Other,
+                            "Failed to get driver area DMA address",
+                        )
+                    })?,
+                    vq.device_area_dma_addr().map_err(|_| {
+                        Error::new(
+                            ErrorKind::Other,
+                            "Failed to get device area DMA address",
+                        )
+                    })?,
+                );
 
-        Ok(queues.into_iter().map(Self::new).collect())
+                queues.push(Self::new(
+                    vq,
+                    iova_translator,
+                    req_bufs,
+                ));
+            }
+
+            queues
+        };
+
+        // Configure the transport using the addresses of OUR queues.
+        let configs = queues
+            .iter()
+            .map(|queue| {
+                adapter::transport_config(&queue.vq).map_err(|_| {
+                    Error::new(
+                        ErrorKind::Other,
+                        "RFL transport config failed",
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        // END TEST
+
+        transport.setup_queues_from_config(&configs)?;
+
+        Ok(queues)
     }
 
     fn queue_request_full(
@@ -400,48 +513,137 @@ impl<'a, C> VirtioBlkQueue<'a, C> {
     ) -> Result<(), Error> {
         let lba = to_lba(offset)?;
 
-        let desc_idx = self.vq.add_request(|req, add_desc| {
-            *req = VirtioBlkReqBuf {
-                header: VirtioBlkReqHeader::new(req_type, lba),
-                status: 0,
-                dwz_data: dwz_data.unwrap_or_default(),
+        // TEST
+        // Choose a queue-local request slot.
+        // Descriptor allocation remains entirely inside OUR VirtQueue.
+        let slot = self.req_contexts
+            .iter()
+            .position(Option::is_none)
+            .ok_or_else(|| {
+                Error::new(ErrorKind::WouldBlock, "No free request slots")
+            })?;
+
+        let req_ptr = unsafe {
+            self.req_bufs.as_ptr().add(slot)
+        };
+
+        // Initialize the entire device-visible request buffer.
+        unsafe {
+            ptr::write(
+                req_ptr,
+                VirtioBlkReqBuf {
+                    header: VirtioBlkReqHeader::new(req_type, lba),
+                    status: 0,
+                    dwz_data: dwz_data.unwrap_or_default(),
+                },
+            );
+        }
+
+        let header_ptr = unsafe {
+            ptr::addr_of_mut!((*req_ptr).header)
+        };
+
+        let status_ptr = unsafe {
+            ptr::addr_of_mut!((*req_ptr).status)
+        };
+
+        let mut segments = Vec::with_capacity(buf.len() + 3);
+
+        // The header is read by the device.
+        let header_dma = self.iova_translator.translate_addr(
+            header_ptr as usize,
+            mem::size_of::<VirtioBlkReqHeader>(),
+        )?;
+
+        segments.push(DmaSegment::new(
+            header_dma.0,
+            mem::size_of::<VirtioBlkReqHeader>() as u32,
+            BufferDirection::DriverToDevice,
+        ));
+
+        // DISCARD / WRITE_ZEROES command data.
+        if dwz_data.is_some() {
+            let dwz_ptr = unsafe {
+                ptr::addr_of_mut!((*req_ptr).dwz_data)
             };
 
-            add_desc(
-                iovec {
-                    iov_base: &mut req.header as *mut _ as *mut c_void,
-                    iov_len: mem::size_of::<VirtioBlkReqHeader>(),
-                },
-                false,
+            let dwz_dma = self.iova_translator.translate_addr(
+                dwz_ptr as usize,
+                mem::size_of::<DiscardWriteZeroesData>(),
             )?;
 
-            if dwz_data.is_some() {
-                add_desc(
-                    iovec {
-                        iov_base: &mut req.dwz_data as *mut _ as *mut c_void,
-                        iov_len: mem::size_of::<DiscardWriteZeroesData>(),
-                    },
-                    false,
-                )?;
+            segments.push(DmaSegment::new(
+                dwz_dma.0,
+                mem::size_of::<DiscardWriteZeroesData>() as u32,
+                BufferDirection::DriverToDevice,
+            ));
+        }
+
+        // Data buffers supplied by the caller.
+        for b in buf {
+            if b.iov_len == 0 {
+                continue;
             }
 
-            for b in buf {
-                add_desc(*b, req_type.is_from_dev())?;
-            }
+            let len = u32::try_from(b.iov_len).map_err(|_| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "Buffer exceeds VirtIO descriptor length",
+                )
+            })?;
 
-            add_desc(
-                iovec {
-                    iov_base: &mut req.status as *mut _ as *mut c_void,
-                    iov_len: 1,
-                },
-                true,
+            let dma = self.iova_translator.translate_addr(
+                b.iov_base as usize,
+                b.iov_len,
             )?;
 
-            Ok(())
-        })?;
+            let direction = if req_type.is_from_dev() {
+                BufferDirection::DeviceToDriver
+            } else {
+                BufferDirection::DriverToDevice
+            };
 
-        let old = self.req_contexts[desc_idx as usize].replace(context);
-        assert!(old.is_none());
+            segments.push(DmaSegment::new(
+                dma.0,
+                len,
+                direction,
+            ));
+        }
+
+        // The status byte is written by the device.
+        let status_dma = self.iova_translator.translate_addr(
+            status_ptr as usize,
+            1,
+        )?;
+
+        segments.push(DmaSegment::new(
+            status_dma.0,
+            1,
+            BufferDirection::DeviceToDriver,
+        ));
+
+        // The context must be registered before the request
+        // can become visible to the backend.
+        self.req_contexts[slot] = Some(context);
+
+        let result = unsafe {
+            self.vq.add(
+                &segments,
+                Token::new(slot),
+                DescriptorLayout::Direct,
+            )
+        };
+
+        if result.is_err() {
+            // The request was not successfully submitted.
+            self.req_contexts[slot].take();
+
+            return Err(Error::new(
+                ErrorKind::Other,
+                "RFL VirtQueue add failed",
+            ));
+        }
+        //END TEST
 
         Ok(())
     }
@@ -608,45 +810,86 @@ impl<'a, C> VirtioBlkQueue<'a, C> {
     }
 
     /// Returns the result for any completed requests.
-    pub fn completions(&mut self) -> CompletionIter<'_, 'a, C> {
+    pub fn completions(&mut self) -> CompletionIter<'_, C> {
+        // TEST
         CompletionIter {
-            it: self.vq.completions(),
-            req_contexts: &mut self.req_contexts,
+            vq: &mut self.vq,
+            req_bufs: self.req_bufs,
+            req_contexts: self.req_contexts.as_mut(),
         }
+        // END TEST
     }
 
     pub fn avail_notif_needed(&mut self) -> bool {
-        self.vq.avail_notif_needed()
+        // TEST
+        self.vq.kick_prepare()
+        // END TEST
     }
 
     pub fn set_used_notif_enabled(&mut self, enabled: bool) {
-        self.vq.set_used_notif_enabled(enabled);
+        // TEST
+        if enabled {
+            let _ = self.vq.enable_cb();
+        } else {
+            self.vq.disable_cb();
+        }
+        // END TEST
     }
 }
 
-pub struct CompletionIter<'a, 'queue, C> {
-    it: VirtqueueIter<'a, 'queue, VirtioBlkReqBuf>,
-    req_contexts: &'a mut Box<[Option<C>]>,
+// TEST
+pub struct CompletionIter<'a, C> {
+    vq: &'a mut VirtQueue<UserspaceHal>,
+    req_bufs: NonNull<VirtioBlkReqBuf>,
+    req_contexts: &'a mut [Option<C>],
 }
 
-impl<C> CompletionIter<'_, '_, C> {
+impl<C> CompletionIter<'_, C> {
     pub fn has_next(&self) -> bool {
-        self.it.has_next()
+        self.vq.can_pop()
     }
 }
 
-impl<C> Iterator for CompletionIter<'_, '_, C> {
+impl<C> Iterator for CompletionIter<'_, C> {
     type Item = Completion<C>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let completion = self.it.next()?;
+        let (token, _len) = match self.vq.get_buf() {
+            Ok(Some(completion)) => completion,
+            Ok(None) => return None,
+            Err(_) => {
+                //TODO remove panic
+                panic!("RFL VirtQueue completion error");
+            }
+        };
 
-        // If the backend sent a completion for a request we never made, just ignore it.
-        let context = self.req_contexts[completion.id as usize].take()?;
+        let slot = token.value();
+
+        let context = self.req_contexts
+            .get_mut(slot)
+            .unwrap_or_else(|| {
+                panic!("RFL completion returned invalid token {slot}")
+            })
+            .take()
+            .unwrap_or_else(|| {
+                panic!("RFL completion returned inactive token {slot}")
+            });
+
+        let req_ptr = unsafe {
+            self.req_bufs.as_ptr().add(slot)
+        };
+
+        // get_buf() has already applied the core's read ordering
+        // before we inspect device-written request data.
+        let status = unsafe {
+            ptr::read_volatile(
+                ptr::addr_of!((*req_ptr).status)
+            )
+        };
 
         Some(Completion {
             context,
-            ret: match completion.req.status {
+            ret: match status {
                 0 => 0,
                 1 => -EIO,
                 2 => -ENOTSUP,
@@ -654,8 +897,6 @@ impl<C> Iterator for CompletionIter<'_, '_, C> {
             },
         })
     }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.it.size_hint()
-    }
 }
+
+// END TEST

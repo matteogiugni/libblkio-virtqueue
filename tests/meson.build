@@ -287,3 +287,14 @@ foreach name : nvme_zoned_script_tests
 
   test(name, exe, suite: 'nvme-io_uring-zoned')
 endforeach
+
+rustvq_script = find_program('rustvq.sh')
+
+test(
+  'rustvq',
+  rustvq_script,
+  suite: 'rustvq',
+  depends: rustvq,
+  is_parallel: false,
+  timeout: 30,
+)

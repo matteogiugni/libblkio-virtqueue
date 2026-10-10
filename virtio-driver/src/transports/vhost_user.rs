@@ -22,6 +22,8 @@ use vhost_user_protocol::{
     VhostUserHeaderFlag, VhostUserMemoryRegion, VhostUserProtocolFeatures, VhostUserVirtioFeatures,
 };
 
+use crate::VirtqueueConfig;
+
 #[derive(Debug)]
 pub struct VhostUserError(Error);
 
@@ -159,6 +161,40 @@ impl<C: ByteValued, R: Copy> VhostUser<C, R> {
         vhost.set_vring_enable(i, true)?;
         Ok(())
     }
+
+    // TEST
+    fn setup_queue_from_config(
+        &mut self,
+        i: usize,
+        q: &VirtqueueConfig,
+    ) -> Result<(), Error> {
+        let vhost = &mut self.vhost;
+
+        vhost.set_vring_num(i, q.queue_size.into())?;
+        vhost.set_vring_base(i, 0)?;
+
+        vhost.set_vring_addr(
+            i,
+            q.desc_device_addr,
+            q.device_device_addr,
+            q.driver_device_addr,
+        )?;
+
+        vhost.set_vring_kick(
+            i,
+            self.eventfd_kick[i].as_raw_fd(),
+        )?;
+
+        vhost.set_vring_call(
+            i,
+            self.eventfd_call[i].as_raw_fd(),
+        )?;
+
+        vhost.set_vring_enable(i, true)?;
+
+        Ok(())
+    }
+    // END TEST
 }
 
 impl<C: ByteValued, R: Copy> VirtioTransport<C, R> for VhostUser<C, R> {
@@ -302,6 +338,30 @@ impl<C: ByteValued, R: Copy> VirtioTransport<C, R> for VhostUser<C, R> {
     fn get_completion_fd(&self, queue_idx: usize) -> Arc<EventFd> {
         Arc::clone(&self.eventfd_call[queue_idx])
     }
+
+    // TEST
+    fn setup_queues_from_config(
+        &mut self,
+        queues: &[VirtqueueConfig],
+    ) -> Result<(), Error> {
+        for (i, q) in queues.iter().enumerate() {
+            self.eventfd_kick
+                .push(Arc::new(EventFd::new(EventfdFlags::CLOEXEC)?));
+
+            self.eventfd_call
+                .push(Arc::new(EventFd::new(EventfdFlags::CLOEXEC)?));
+
+            self.setup_queue_from_config(i, q)
+                .map_err(|e| {
+                    self.eventfd_kick.clear();
+                    self.eventfd_call.clear();
+                    Error::new(ErrorKind::Other, e)
+                })?;
+        }
+
+        Ok(())
+    }
+    // END TEST
 }
 
 struct VhostUserNotifier {
