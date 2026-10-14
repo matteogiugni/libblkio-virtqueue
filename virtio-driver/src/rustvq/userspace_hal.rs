@@ -1,6 +1,6 @@
 use std::{
     alloc::{alloc, dealloc, Layout},
-    cell::Cell,
+    cell::{Cell, RefCell},
     io::{Error, ErrorKind},
     ptr::NonNull,
     sync::atomic::{fence, Ordering},
@@ -17,8 +17,12 @@ pub(crate) struct UserspaceHal {
     cpu_base: NonNull<u8>,
     dma_base: u64,
     size: usize,
-    //CHECK cell is not sync
     next_offset: Cell<usize>,
+    free_dma: RefCell<Vec<DmaRegion>>,
+
+    new_allocations: Cell<usize>,
+    reused_allocations: Cell<usize>,
+    freed_allocations: Cell<usize>,
 }
 
 impl UserspaceHal {
@@ -39,6 +43,10 @@ impl UserspaceHal {
             dma_base,
             size,
             next_offset: Cell::new(0),
+            free_dma: RefCell::new(Vec::new()),
+            new_allocations: Cell::new(0),
+            reused_allocations: Cell::new(0),
+            freed_allocations: Cell::new(0),
         }
     }
 
@@ -123,12 +131,51 @@ unsafe impl Allocator for UserspaceHal {
         size: usize,
         align: usize,
     ) -> Result<DmaRegion, Self::Error> {
-        if size == 0 {
+        if size == 0 || align == 0 || !align.is_power_of_two() {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
                 "zero-sized DMA allocation",
             ));
         }
+
+        // Validate size and alignment using the existing checks
+        // before executing this block.
+
+        let reusable = {
+            let free = self.free_dma.borrow();
+
+            free.iter()
+                .enumerate()
+                .filter(|(_, region)| {
+                    region.size >= size
+                        && (region.cpu_addr.as_ptr() as usize) % align == 0
+                        && region.dma_addr % (align as u64) == 0
+                })
+                .min_by_key(|(_, region)| region.size)
+                .map(|(index, _)| index)
+        };
+
+        if let Some(index) = reusable {
+            let region = self.free_dma
+                .borrow_mut()
+                .swap_remove(index);
+
+            // The HAL contract requires zero-initialized DMA memory.
+            unsafe {
+                std::ptr::write_bytes(
+                    region.cpu_addr.as_ptr(),
+                    0,
+                    region.size,
+                );
+            }
+
+            self.reused_allocations.set(self.reused_allocations.get() + 1);
+
+            return Ok(region);
+        }
+
+        // No suitable reusable allocation:
+        // continue with the previous allocator.
 
         let current = self.next_offset.get();
         let offset = Self::align_up(current, align)?;
@@ -172,6 +219,7 @@ unsafe impl Allocator for UserspaceHal {
         }
 
         self.next_offset.set(end);
+        self.new_allocations.set(self.new_allocations.get() + 1);
 
         Ok(DmaRegion {
             cpu_addr,
@@ -182,12 +230,10 @@ unsafe impl Allocator for UserspaceHal {
 
     unsafe fn dma_free(
         &self,
-        _region: DmaRegion,
+        region: DmaRegion,
     ) {
-        // Intentionally a no-op for the first direct-descriptor test.
-        //
-        // The entire backing arena lives longer than the VirtQueue and
-        // is released as a whole during queue teardown.
+        self.free_dma.borrow_mut().push(region);
+        self.freed_allocations.set(self.freed_allocations.get() + 1);
     }
 }
 
@@ -206,5 +252,33 @@ unsafe impl Hal for UserspaceHal {
     #[inline]
     fn mb(&self) {
         fence(Ordering::SeqCst);
+    }
+}
+
+impl Drop for UserspaceHal {
+    fn drop(&mut self) {
+        let new = self.new_allocations.get();
+        let reused = self.reused_allocations.get();
+        let freed = self.freed_allocations.get();
+
+        let total = new + reused;
+        let outstanding = total.saturating_sub(freed);
+
+        eprintln!(
+            "RustVQ HAL DMA statistics \
+             [cpu_base={:#x}]: \
+             new={} reused={} freed={} \
+             outstanding={} \
+             arena_used={}/{} \
+             free_blocks={}",
+            self.cpu_base.as_ptr() as usize,
+            new,
+            reused,
+            freed,
+            outstanding,
+            self.next_offset.get(),
+            self.size,
+            self.free_dma.get_mut().len(),
+        );
     }
 }

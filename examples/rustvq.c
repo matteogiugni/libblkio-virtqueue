@@ -342,9 +342,11 @@ int main(int argc, char **argv)
 
     printf("Scatter-gather WRITEV/READV: PASSED\n");
 
+    fprintf(stderr, "C TEST: before blkio_destroy\n");
     // Both requests have completed: no outstanding I/O.
     // The original libblkio destroy path handles registered memory.
     blkio_destroy(&b);
+    fprintf(stderr, "C TEST: after blkio_destroy\n");
 
     printf("Test completed successfully\n");
     return EXIT_SUCCESS;

@@ -22,6 +22,8 @@ use crate::rustvq::{
 
 use crate::IovaTranslator;
 use std::ptr::{self, NonNull};
+
+const INDIRECT_DMA_BYTES: usize = 64 * 1024;
 //END TEST
 
 bitflags! {
@@ -328,10 +330,39 @@ impl<C> VirtioBlkQueue<C> {
                 "RFL POC supports split virtqueues only",
             ));
         }
+
+        if !features.contains(VirtioFeatureFlags::RING_INDIRECT_DESC) {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "RustVQ POC requires indirect descriptors",
+            ));
+        }
+
+        let mut layout =
+            VirtqueueLayout::new::<VirtioBlkReqBuf>(num_queues, queue_size as usize, features)?;
+        if features.contains(VirtioFeatureFlags::RING_INDIRECT_DESC) {
+            layout.req_offset = layout
+                .req_offset
+                .checked_add(INDIRECT_DMA_BYTES)
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::InvalidInput,
+                        "Indirect DMA arena size overflow",
+                    )
+                })?;
+
+            layout.end_offset = layout
+                .end_offset
+                .checked_add(INDIRECT_DMA_BYTES)
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::InvalidInput,
+                        "Queue memory size overflow",
+                    )
+                })?;
+        }
         // END TEST
 
-        let layout =
-            VirtqueueLayout::new::<VirtioBlkReqBuf>(num_queues, queue_size as usize, features)?;
         let queues: Vec<Self> = {
             // Not actually needless: must drop the borrow on the transport before alloc_queue_mem()
             #[allow(clippy::needless_collect)]
@@ -433,11 +464,19 @@ impl<C> VirtioBlkQueue<C> {
                 };
 
                 let vq_features = VirtQueueFeatures {
-                    indirect: false,
+                    indirect: features.contains(
+                        VirtioFeatureFlags::RING_INDIRECT_DESC,
+                    ),
                     event_idx: features.contains(
-                        VirtioFeatureFlags::RING_EVENT_IDX
+                        VirtioFeatureFlags::RING_EVENT_IDX,
                     ),
                 };
+
+                eprintln!(
+                    "RustVQ features: indirect={} event_idx={}",
+                    vq_features.indirect,
+                    vq_features.event_idx,
+                );
 
                 let vq = rustvq::new_virtqueue(
                     hal,
@@ -630,7 +669,7 @@ impl<C> VirtioBlkQueue<C> {
             self.vq.add(
                 &segments,
                 Token::new(slot),
-                DescriptorLayout::Direct,
+                DescriptorLayout::Indirect
             )
         };
 

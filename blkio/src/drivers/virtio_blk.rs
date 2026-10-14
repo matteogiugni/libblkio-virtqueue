@@ -721,8 +721,13 @@ impl Driver for VirtioBlk {
                 Box::new(
                     // We could set self.props.may_pin_mem_regions = false here, but a vhost-user-blk
                     // backend server could pin pages so we don't know for sure.
-                    virtio_driver::VhostUser::new(&self.props.path, features)
+                    // TEST
+                    virtio_driver::VhostUser::new(
+                            &self.props.path,
+                            features | VirtioFeatureFlags::RING_INDIRECT_DESC.bits(),
+                        )
                         .map_err(|e| Error::from_io_error(e, Errno::IO))?,
+                    // END TEST
                 )
             }
             #[cfg(feature = "virtio-blk-vhost-vdpa")]
