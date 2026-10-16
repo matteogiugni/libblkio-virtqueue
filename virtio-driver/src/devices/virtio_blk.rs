@@ -11,13 +11,16 @@ use std::mem;
 
 // TEST
 use crate::rustvq::{
-    self,
     adapter,
     userspace_hal::UserspaceHal,
-    virtqueue::{
-        BufferDirection, DescriptorLayout, DmaSegment, Token,
-        VirtQueue, VirtQueueFeatures,
-    },
+};
+use rust_virtqueue::virtqueue::{
+    BufferDirection, 
+    DescriptorLayout, 
+    DmaSegment, 
+    Token,
+    VirtQueue, 
+    VirtQueueFeatures,
 };
 
 use crate::IovaTranslator;
@@ -478,7 +481,7 @@ impl<C> VirtioBlkQueue<C> {
                     vq_features.event_idx,
                 );
 
-                let vq = rustvq::new_virtqueue(
+                let vq = VirtQueue::new(
                     hal,
                     i as u16,
                     queue_size,

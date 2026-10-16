@@ -115,6 +115,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-virtqueue"
+version = "0.1.0"
+source = "git+https://github.com/matteogiugni/rust-virtqueue.git?rev=7360527c82f162de0ad0b1d624ebae46ed322e08#7360527c82f162de0ad0b1d624ebae46ed322e08"
+
+[[package]]
 name = "rustix"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -141,6 +146,7 @@ dependencies = [
  "libc",
  "memmap2",
  "pci-driver",
+ "rust-virtqueue",
  "rustix",
  "virtio-bindings",
 ]

@@ -6,7 +6,7 @@ use std::{
     sync::atomic::{fence, Ordering},
 };
 
-use super::virtqueue::hal::{
+use rust_virtqueue::virtqueue::hal::{
     Allocator,
     DmaRegion,
     Hal,

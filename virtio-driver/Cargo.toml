@@ -22,3 +22,4 @@ rustix = { version = "1", features = ["event"] }
 memmap2 = { version = "<0.10", optional = true }
 pci-driver = { version = "0.1.2", default-features = false, optional = true }
 virtio-bindings = { version = "0.2", optional = true }
+rust-virtqueue = { git = "https://github.com/matteogiugni/rust-virtqueue.git", rev = "7360527c82f162de0ad0b1d624ebae46ed322e08" }
