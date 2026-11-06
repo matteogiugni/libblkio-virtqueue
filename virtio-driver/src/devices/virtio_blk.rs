@@ -26,7 +26,7 @@ use rust_virtqueue::virtqueue::{
 use crate::IovaTranslator;
 use std::ptr::{self, NonNull};
 
-const INDIRECT_DMA_BYTES: usize = 64 * 1024;
+//const INDIRECT_DMA_BYTES: usize = 64 * 1024;
 //END TEST
 
 bitflags! {
@@ -334,15 +334,17 @@ impl<C> VirtioBlkQueue<C> {
             ));
         }
 
+        /* TESTING WITH DIRECT DESCRIPTORS ONLY, COMMENTING OUT FOR NOW
         if !features.contains(VirtioFeatureFlags::RING_INDIRECT_DESC) {
             return Err(Error::new(
                 ErrorKind::Unsupported,
                 "RustVQ POC requires indirect descriptors",
             ));
-        }
+        }*/
 
-        let mut layout =
+        let /*mut*/ layout =
             VirtqueueLayout::new::<VirtioBlkReqBuf>(num_queues, queue_size as usize, features)?;
+        /*TESTING WITH DIRECT DESCRIPTORS ONLY, COMMENTING OUT FOR NOW
         if features.contains(VirtioFeatureFlags::RING_INDIRECT_DESC) {
             layout.req_offset = layout
                 .req_offset
@@ -363,7 +365,7 @@ impl<C> VirtioBlkQueue<C> {
                         "Queue memory size overflow",
                     )
                 })?;
-        }
+        }*/
         // END TEST
 
         let queues: Vec<Self> = {
@@ -475,11 +477,11 @@ impl<C> VirtioBlkQueue<C> {
                     ),
                 };
 
-                eprintln!(
+                /*eprintln!(
                     "RustVQ features: indirect={} event_idx={}",
                     vq_features.indirect,
                     vq_features.event_idx,
-                );
+                );*/
 
                 let vq = VirtQueue::new(
                     hal,
@@ -494,6 +496,7 @@ impl<C> VirtioBlkQueue<C> {
                     )
                 })?;
 
+                /*NO NEED FOR THESE STATISTICS DURING PERFORMANCE TESTING, COMMENTING OUT FOR NOW
                 eprintln!(
                     "RFL queue {i}: desc={:#x} avail={:#x} used={:#x}",
                     vq.descriptor_dma_addr().map_err(|_| {
@@ -514,7 +517,7 @@ impl<C> VirtioBlkQueue<C> {
                             "Failed to get device area DMA address",
                         )
                     })?,
-                );
+                );*/
 
                 queues.push(Self::new(
                     vq,
@@ -672,7 +675,7 @@ impl<C> VirtioBlkQueue<C> {
             self.vq.add(
                 &segments,
                 Token::new(slot),
-                DescriptorLayout::Indirect
+                DescriptorLayout::Direct
             )
         };
 

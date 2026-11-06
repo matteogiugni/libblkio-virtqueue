@@ -20,9 +20,9 @@ pub(crate) struct UserspaceHal {
     next_offset: Cell<usize>,
     free_dma: RefCell<Vec<DmaRegion>>,
 
-    new_allocations: Cell<usize>,
+    /*new_allocations: Cell<usize>,
     reused_allocations: Cell<usize>,
-    freed_allocations: Cell<usize>,
+    freed_allocations: Cell<usize>,*/
 }
 
 impl UserspaceHal {
@@ -44,9 +44,10 @@ impl UserspaceHal {
             size,
             next_offset: Cell::new(0),
             free_dma: RefCell::new(Vec::new()),
+            /*NO NEED FOR THESE STATISTICS DURING PERFORMANCE TESTING, COMMENTING OUT FOR NOW
             new_allocations: Cell::new(0),
             reused_allocations: Cell::new(0),
-            freed_allocations: Cell::new(0),
+            freed_allocations: Cell::new(0),*/
         }
     }
 
@@ -169,7 +170,7 @@ unsafe impl Allocator for UserspaceHal {
                 );
             }
 
-            self.reused_allocations.set(self.reused_allocations.get() + 1);
+            //self.reused_allocations.set(self.reused_allocations.get() + 1);
 
             return Ok(region);
         }
@@ -219,7 +220,7 @@ unsafe impl Allocator for UserspaceHal {
         }
 
         self.next_offset.set(end);
-        self.new_allocations.set(self.new_allocations.get() + 1);
+        //self.new_allocations.set(self.new_allocations.get() + 1);
 
         Ok(DmaRegion {
             cpu_addr,
@@ -233,7 +234,7 @@ unsafe impl Allocator for UserspaceHal {
         region: DmaRegion,
     ) {
         self.free_dma.borrow_mut().push(region);
-        self.freed_allocations.set(self.freed_allocations.get() + 1);
+        //self.freed_allocations.set(self.freed_allocations.get() + 1);
     }
 }
 
@@ -257,6 +258,8 @@ unsafe impl Hal for UserspaceHal {
 
 impl Drop for UserspaceHal {
     fn drop(&mut self) {
+        /*
+        NO NEED FOR THESE STATISTICS DURING PERFORMANCE TESTING, COMMENTING OUT FOR NOW
         let new = self.new_allocations.get();
         let reused = self.reused_allocations.get();
         let freed = self.freed_allocations.get();
@@ -279,6 +282,6 @@ impl Drop for UserspaceHal {
             self.next_offset.get(),
             self.size,
             self.free_dma.get_mut().len(),
-        );
+        );*/
     }
 }
